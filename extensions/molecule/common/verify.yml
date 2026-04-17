@@ -3,7 +3,7 @@
   hosts: patroni_cluster
   any_errors_fatal: true
   vars_files:
-    - ../../playbooks/vars/main.yml
+    - ../../../playbooks/vars/main.yml
   vars:
     _suffix: "{{ (ansible_os_family == 'RedHat') | ternary('.service', '') }}"
     _service: "{{ _patroni_cluster_service_name }}{{ _suffix }}"
@@ -98,7 +98,7 @@
 
     - name: Query data checksum
       community.postgresql.postgresql_query:
-        db: postgres
+        login_db: postgres
         query: "SHOW data_checksums"
       become: true
       become_user: "{{ _postgresql_user }}"
@@ -167,11 +167,22 @@
           vars:
             _members: "{{ _cluster_status_query.json.members }}"
             _masters: "{{ _members | selectattr('role', 'equalto', 'leader') }}"
+          when: not _patroni_cluster_standby | bool
+
+        - name: Verify cluster standby-leader
+          ansible.builtin.assert:
+            that: _leader | length == 1
+            success_msg: "Found cluster standby-leader {{ (_leader | first).name }}"
+            fail_msg: "Cluster does not have a master"
+          vars:
+            _members: "{{ _cluster_status_query.json.members }}"
+            _leader: "{{ _members | selectattr('role', 'equalto', 'standby_leader') }}"
+          when: _patroni_cluster_standby | bool
 
         - name: Verify cluster member status
           ansible.builtin.assert:
             that:
-              - _status.role in ['leader', 'replica', 'sync_standby']
+              - _status.role in ['leader', 'replica', 'sync_standby', 'standby_leader']
               - _status.state in ['running', 'streaming']
           vars:
             _members: "{{ _cluster_status_query.json.members }}"
@@ -219,7 +230,7 @@
         - name: Query registered extensions
           community.postgresql.postgresql_query:
             query: "SELECT pg_current_logfile()"
-            db: postgres
+            login_db: postgres
           become: true
           become_user: postgres
           register: _log_query
@@ -236,7 +247,7 @@
         - name: Query registered extensions
           community.postgresql.postgresql_query:
             query: "SELECT extname FROM pg_extension"
-            db: postgres
+            login_db: postgres
           become: true
           become_user: postgres
           register: _extension_query
@@ -251,6 +262,7 @@
               - pgaudit
               - pg_cron
               - pg_stat_statements
+              - pg_partman
             _missing: "{{ _expected | difference(_registered) }}"
 
         - name: Verify registered extensions
@@ -301,7 +313,7 @@
   hosts: patroni_consul
   any_errors_fatal: true
   vars_files:
-    - ../../playbooks/vars/main.yml
+    - ../../../playbooks/vars/main.yml
   tasks:
     - name: Verify Consul cluster status
       block:
@@ -352,7 +364,7 @@
   hosts: patroni_haproxy
   any_errors_fatal: true
   vars_files:
-    - ../../playbooks/vars/main.yml
+    - ../../../playbooks/vars/main.yml
   tasks:
     - name: Create virtualenv
       ansible.builtin.tempfile:
@@ -378,7 +390,7 @@
       block:
         - name: Verify master connectivity
           community.postgresql.postgresql_info:
-            db: "{{ patroni_molecule_database }}"
+            login_db: "{{ patroni_molecule_database }}"
             filter:
               - "version"
             login_host: 127.0.0.1
@@ -389,7 +401,7 @@
         - name: Query master role
           community.postgresql.postgresql_query:
             query: "SELECT pg_is_in_recovery()"
-            db: postgres
+            login_db: postgres
             login_host: 127.0.0.1
             login_user: "{{ patroni_molecule_username }}"
             login_password: "{{ patroni_molecule_password }}"
@@ -400,10 +412,11 @@
           ansible.builtin.assert:
             that: not _master_query.query_result[0].pg_is_in_recovery
             fail_msg: "Master query result was {{ _master_query.query_result }}"
+          when: not _patroni_cluster_standby | bool
 
         - name: Test slave connectivity
           community.postgresql.postgresql_info:
-            db: "{{ patroni_molecule_database }}"
+            login_db: "{{ patroni_molecule_database }}"
             filter:
               - "version"
             login_host: 127.0.0.1
@@ -414,7 +427,7 @@
         - name: Query slave role
           community.postgresql.postgresql_query:
             query: "SELECT pg_is_in_recovery()"
-            db: postgres
+            login_db: postgres
             login_host: 127.0.0.1
             login_user: "{{ patroni_molecule_username }}"
             login_password: "{{ patroni_molecule_password }}"
@@ -432,13 +445,13 @@
   become: true
   become_user: "{{ _patroni_barman_user }}"
   vars_files:
-    - ../../playbooks/vars/main.yml
+    - ../../../playbooks/vars/main.yml
   tasks:
     - name: Test direct ssh connectivity to Patroni cluster members
       ansible.builtin.command: "ssh postgres@{{ item.0 }} {{ _ssh_options }} hostname"
       vars:
         _ssh_options: "-o StrictHostKeyChecking=no -i ~{{ _patroni_barman_user }}/.ssh/id_rsa"
-        _patroni_hosts: "{{ groups['patroni_cluster'] }}"
+        _patroni_hosts: "{{ _patroni_cluster_members }}"
       loop_control:
         label: "{{ item.1 }}"
       loop: "{{ _patroni_hosts | map('extract', hostvars, _patroni_addrkeys) | zip(_patroni_hosts) }}"
@@ -448,7 +461,7 @@
       vars:
         _ssh_options: "-o StrictHostKeyChecking=no -i ~{{ _patroni_barman_user }}/.ssh/id_rsa"
         _ssh_port: "{{ _patroni_haproxy_port_ssh_master_local }}"
-        _patroni_hosts: "{{ groups['patroni_cluster'] }}"
+        _patroni_hosts: "{{ _patroni_cluster_members }}"
 
     - name: Verify Barman cron execution
       ansible.builtin.command: "barman cron"

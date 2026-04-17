@@ -1,0 +1,204 @@
+---
+dependency:
+  name: galaxy
+  options:
+    role-file: requirements.yml
+    requirements-file: requirements.yml
+driver:
+  name: default
+platforms:
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-cluster-01
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 4
+    size: 30G
+    groups:
+      - patroni_cluster
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-cluster-02
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 4
+    size: 30G
+    groups:
+      - patroni_cluster
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-cluster-03
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 4
+    size: 30G
+    groups:
+      - patroni_cluster
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-consul-01
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 1
+    memory: 1
+    size: 30G
+    groups:
+      - patroni_consul
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-consul-02
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 1
+    memory: 1
+    size: 30G
+    groups:
+      - patroni_consul
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-consul-03
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 1
+    memory: 1
+    size: 30G
+    groups:
+      - patroni_consul
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-haproxy-01
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 2
+    size: 30G
+    groups:
+      - patroni_haproxy
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-haproxy-02
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 2
+    size: 30G
+    groups:
+      - patroni_haproxy
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-haproxy-03
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 2
+    size: 30G
+    groups:
+      - patroni_haproxy
+  - name: patroni-${MOLECULE_SCENARIO_NAME}-barman-01
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 1
+    memory: 4
+    size: 30G
+    groups:
+      - patroni_barman
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      allow_world_readable_tmpfiles: true
+      callbacks_enabled: ansible.posix.profile_tasks
+  playbooks:
+    create: ../common/create.yml
+    destroy: ../common/destroy.yml
+    cleanup: ../common/cleanup.yml
+    prepare: ../common/prepare.yml
+    converge: ../common/install.yml
+  inventory:
+    hosts:
+      all:
+        vars:
+          libvirt_platforms: "{{ molecule_yml.platforms }}"
+          patroni_nolog: false
+          postgresql_nolog: "{{ patroni_nolog | bool }}"
+          patroni_release_postgresql: 16
+          patroni_config_hostnames: false
+          patroni_consul_backuppath: /backup
+          patroni_cluster_name: molecule
+          patroni_cluster_api_password: molecule
+          patroni_cluster_postgres_password: molecule
+          patroni_cluster_replication_password: molecule
+          patroni_cluster_rewind_password: molecule
+          patroni_cluster_barman_password: molecule
+          patroni_watchdog_enable: false
+          patroni_watchdog_mode: off
+          patroni_molecule_username: molecule
+          patroni_molecule_password: molecule
+          patroni_test_username: test
+          patroni_test_password: test
+          patroni_molecule_database: molecule
+          patroni_test_database: test
+          patroni_bladb_database: BlaDB
+          patroni_barman_verify: true
+          patroni_cluster_roles:
+            - name: "{{ patroni_molecule_username }}"
+              password: "{{ patroni_molecule_password }}"
+            - name: "{{ patroni_test_username }}"
+              password: "{{ patroni_test_password }}"
+          patroni_cluster_databases:
+            - name: "{{ patroni_molecule_database }}"
+              roles:
+                - name: "{{ patroni_molecule_username }}"
+                  privs: ALL
+                - name: "{{ patroni_test_username }}"
+                  privs: ALL
+            - name: "{{ patroni_test_database }}"
+              roles:
+                - name: "{{ patroni_molecule_username }}"
+                  privs: ALL
+                - name: "{{ patroni_test_username }}"
+                  privs: ALL
+            - name: "{{ patroni_bladb_database }}"
+              roles:
+                - name: "{{ patroni_molecule_username }}"
+                  privs: ALL
+                - name: "{{ patroni_test_username }}"
+                  privs: ALL
+          patroni_fdw_remote_prefix: "remote"
+          patroni_cluster_fdw:
+            - source: "{{ patroni_molecule_database }}"
+              remote: "{{ patroni_fdw_remote_prefix }}_{{ patroni_molecule_database }}"
+              users:
+                molecule:
+                  password: "{{ patroni_molecule_password }}"
+                test:
+                  password: "{{ patroni_test_password }}"
+              tables:
+                molecule_table1:
+                  columns:
+                    - Username character varying(50) NOT NULL
+                    - CountryId integer NOT NULL
+                molecule_table2:
+                  columns:
+                    - Username character varying(50) NOT NULL
+                    - CountryId integer NOT NULL
+                  source_schema: molecule_source_schema
+                  remote_schema: molecule_remote_schema
+            - source: "{{ patroni_test_database }}"
+              remote: "{{ patroni_fdw_remote_prefix }}_{{ patroni_test_database }}"
+              users:
+                molecule:
+                  password: "{{ patroni_molecule_password }}"
+                test:
+                  password: "{{ patroni_test_password }}"
+              tables:
+                test_table1:
+                  columns:
+                    - Username character varying(50) NOT NULL
+                    - CountryId integer NOT NULL
+            - source: "{{ patroni_bladb_database }}"
+              remote: "{{ patroni_fdw_remote_prefix }}_{{ patroni_bladb_database }}"
+              users:
+                molecule:
+                  password: "{{ patroni_molecule_password }}"
+                test:
+                  password: "{{ patroni_test_password }}"
+              tables:
+                bladb_table1:
+                  columns:
+                    - Username character varying(50) NOT NULL
+                    - CountryId integer NOT NULL
+                  source_schema: bladb_source_schema
+                  remote_schema: bladb_remote_schema
+verifier:
+  name: ansible
+scenario:
+  prepare_sequence:
+    - prepare
+  converge_sequence:
+    - converge
+  destroy_sequence:
+    - destroy
+  cleanup_sequence:
+    - cleanup
+  test_sequence:
+    - dependency
+    - create
+    - prepare
+    - converge
+    - side_effect

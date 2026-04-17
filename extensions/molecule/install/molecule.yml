@@ -5,154 +5,96 @@ dependency:
     role-file: requirements.yml
     requirements-file: requirements.yml
 driver:
-  name: docker
+  name: default
 platforms:
   - name: patroni-${MOLECULE_SCENARIO_NAME}-cluster-01
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 4
+    size: 30G
     groups:
       - patroni_cluster
   - name: patroni-${MOLECULE_SCENARIO_NAME}-cluster-02
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 4
+    size: 30G
     groups:
       - patroni_cluster
   - name: patroni-${MOLECULE_SCENARIO_NAME}-cluster-03
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 4
+    size: 30G
     groups:
       - patroni_cluster
   - name: patroni-${MOLECULE_SCENARIO_NAME}-consul-01
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 1
+    memory: 1
+    size: 30G
     groups:
       - patroni_consul
   - name: patroni-${MOLECULE_SCENARIO_NAME}-consul-02
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 1
+    memory: 1
+    size: 30G
     groups:
       - patroni_consul
   - name: patroni-${MOLECULE_SCENARIO_NAME}-consul-03
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 1
+    memory: 1
+    size: 30G
     groups:
       - patroni_consul
   - name: patroni-${MOLECULE_SCENARIO_NAME}-haproxy-01
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 2
+    size: 30G
     groups:
       - patroni_haproxy
   - name: patroni-${MOLECULE_SCENARIO_NAME}-haproxy-02
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 2
+    size: 30G
     groups:
       - patroni_haproxy
   - name: patroni-${MOLECULE_SCENARIO_NAME}-haproxy-03
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 2
+    memory: 2
+    size: 30G
     groups:
       - patroni_haproxy
   - name: patroni-${MOLECULE_SCENARIO_NAME}-barman-01
-    image: "geerlingguy/docker-${MOLECULE_DOCKER_IMAGE:-ubuntu2204}-ansible:latest"
-    command: ${MOLECULE_DOCKER_COMMAND:-""}
-    cgroupns_mode: host
-    privileged: true
-    pre_build_image: true
-    volumes:
-      - /sys/fs/cgroup:/sys/fs/cgroup:rw
-    tmpfs:
-      - /tmp
-      - /opt
+    image: "${MOLECULE_KVM_IMAGE}"
+    cpu: 1
+    memory: 4
+    size: 30G
     groups:
       - patroni_barman
 provisioner:
   name: ansible
   config_options:
     defaults:
-      remote_tmp: /tmp
       allow_world_readable_tmpfiles: true
       callbacks_enabled: ansible.posix.profile_tasks
   playbooks:
+    create: ../common/create.yml
+    destroy: ../common/destroy.yml
+    cleanup: ../common/cleanup.yml
     prepare: ../common/prepare.yml
     converge: ../common/install.yml
     verify: ../common/verify.yml
-    side_effect: ../common/configure.yml
   inventory:
     hosts:
       all:
         vars:
+          libvirt_platforms: "{{ molecule_yml.platforms }}"
           patroni_nolog: false
           postgresql_nolog: "{{ patroni_nolog | bool }}"
           patroni_release_postgresql: 16
@@ -190,6 +132,27 @@ provisioner:
               roles:
                 - name: "{{ patroni_molecule_username }}"
                   privs: ALL
+          patroni_cluster_pgpass_settings:
+            - user: "{{ patroni_molecule_username }}"
+              password: "{{ patroni_molecule_password }}"
+          patroni_cluster_pg_cron_jobs:
+            - job_name: molecule
+              schedule: "30 seconds"
+              command: "SELECT 1"
+            - job_name: test
+              schedule: "10 3 * * 6"
+              command: "SELECT 1"
+            - job_name: inventory
+              schedule: "30 3 * * 6"
+              command: "SELECT 1"
+          patroni_cluster_materialized_views:
+            - name: view_postgres
+              query: |
+                select 1
+            - name: view_test
+              query: |
+                select 1
+              login_db: "{{ patroni_molecule_database }}"
 verifier:
   name: ansible
 scenario:

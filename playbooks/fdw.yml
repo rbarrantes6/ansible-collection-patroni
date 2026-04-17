@@ -1,0 +1,722 @@
+---
+- name: Set cluster facts
+  ansible.builtin.import_playbook: nephelaiio.patroni.facts
+
+- name: Deploy Foreign Data Wrappers
+  hosts: "{{ _patroni_cluster_master_group }}"
+  any_errors_fatal: true
+  become: true
+  vars_files:
+    - main.yml
+  tasks:
+    - name: End play when there are no FDWs to manage
+      ansible.builtin.meta: end_play
+      when: _patroni_cluster_fdw | length == 0
+
+    - name: Verify postgresql foreign data wrapper parameters
+      ansible.builtin.assert:
+        that:
+          - _source | length == 0
+          - _remote | length == 0
+          - _users | length == 0
+          - _tables | length == 0
+      vars:
+        _databases: "{{ _patroni_cluster_fdw }}"
+        _source: "{{ _databases | rejectattr('source', 'defined') }}"
+        _remote: "{{ _databases | rejectattr('remote', 'defined') }}"
+        _users: "{{ _databases | rejectattr('users', 'defined') }}"
+        _tables: "{{ _databases | rejectattr('tables', 'defined') }}"
+
+    - name: Set PostgreSQL FDW fact
+      ansible.builtin.set_fact:
+        _patroni_cluster_fdw_databases: "{{ _users_overwritten }}"
+      vars:
+        _fdw: "{{ _patroni_cluster_fdw | sort(attribute='remote') }}"
+        _tables: "{{ _fdw | map(attribute='tables') | map('dict2items') }}"
+        _tables_dict: "{{ _tables | map('nephelaiio.plugins.to_dict', 'tables') }}"
+        _tables_overwritten: "{{ _fdw | zip(_tables_dict) | map('combine') }}"
+        _users: "{{ _tables_overwritten | map(attribute='users') | map('dict2items') }}"
+        _users_dict: "{{ _users | map('nephelaiio.plugins.to_dict', 'users') }}"
+        _users_overwritten: "{{ _tables_overwritten | zip(_users_dict) | map('combine') }}"
+
+    - name: Query existing roles
+      community.postgresql.postgresql_info:
+        filter:
+          - "roles"
+      become: true
+      become_user: "{{ _postgresql_user }}"
+      register: _patroni_roles_query_results
+
+    - name: Set existing PostgreSQL roles fact
+      ansible.builtin.set_fact:
+        _patroni_fdw_existing_roles: "{{ _roles.keys() }}"
+      vars:
+        _roles: "{{ _patroni_roles_query_results.roles | default({}) }}"
+
+    - name: Verify PostgreSQL foreign data wrapper roles
+      ansible.builtin.assert:
+        that: _missing_roles | length == 0
+        fail_msg: "There are missing roles in PostgreSQL: [{{ _missing_roles | join(', ') }}]"
+      vars:
+        _databases: "{{ _patroni_cluster_fdw_databases }}"
+        _users: "{{ _databases | map(attribute='users') | flatten }}"
+        _user_names: "{{ _users | map(attribute='key') | flatten }}"
+        _existing_users: "{{ _patroni_fdw_existing_roles }}"
+        _missing_roles: "{{ _user_names | reject('in', _existing_users) }}"
+
+    - name: Verify postgresql foreign data wrapper remotes
+      ansible.builtin.assert:
+        that: (_databases | length) == (_remotes | length)
+        fail_msg: "Remote database should be unique"
+      vars:
+        _databases: "{{ _patroni_cluster_fdw_databases }}"
+        _remotes: "{{ _databases | map(attribute='remote') | flatten | unique }}"
+
+    - name: Set PostgreSQL facts
+      ansible.builtin.include_role:
+        name: nephelaiio.patroni.postgresql
+        tasks_from: vars.yml
+
+    - name: Confirm if source database exist
+      community.postgresql.postgresql_ping:
+        login_db: "{{ _name }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+      vars:
+        _name: "{{ item.source }}"
+      loop_control:
+        label: "{{ _name }}"
+      loop: "{{ _patroni_cluster_fdw_databases }}"
+      become_user: "{{ _postgresql_user }}"
+      register: _postgresql_db_source_query
+
+    - name: Verify postgresql source databases
+      ansible.builtin.assert:
+        that: _missing | length == 0
+        fail_msg: "There are missing source databases in PostgreSQL: [{{ _missing_names | join(', ') }}]"
+      vars:
+        _results: "{{ _postgresql_db_source_query.results | default([]) }}"
+        _missing: "{{ _results | rejectattr('is_available') }}"
+        _missing_names: "{{ _missing | map(attribute='source') }}"
+
+    - name: Set default FDW user mappings fact
+      ansible.builtin.set_fact:
+        _patroni_fdw_existing_user_mappings: []
+        _patroni_fdw_existing_tables: []
+        _patroni_fdw_delete_tables: []
+        _patroni_fdw_delete_user_mappings: []
+        _patroni_cluster_fdw_targets: []
+        _to_dict: "nephelaiio.plugins.to_dict"
+        _map_format: "nephelaiio.plugins.map_format"
+        _drop_attrs: "nephelaiio.plugins.drop_attributes"
+        _map_join: "nephelaiio.plugins.map_join"
+
+    - name: Set PostgreSQL FDW target fact
+      ansible.builtin.set_fact:
+        _patroni_cluster_fdw_targets: "{{ _patroni_cluster_fdw_targets + [item | combine(_dict_overwritten)] }}"
+      vars:
+        _map_tables_default:
+          source_schema: public
+          remote_schema: public
+        _map_users_default:
+          password_required: true
+        _users: "{{ item.users | sort(attribute='key') }}"
+        _value_users: "{{ _users | map(attribute='value') }}"
+        _value_users_overwritten: "{{ [_map_users_default] | product(_value_users) | map('combine') }}"
+        _value_users_dict: "{{ _value_users_overwritten | map(_to_dict, 'value') }}"
+        _tables: "{{ item.tables | sort(attribute='key') }}"
+        _value_tables: "{{ _tables | map(attribute='value') }}"
+        _value_tables_overwritten: "{{ [_map_tables_default] | product(_value_tables) | map('combine') }}"
+        _value_tables_dict: "{{ _value_tables_overwritten | map(_to_dict, 'value') }}"
+        _dict_overwritten:
+          tables: "{{ _tables | zip(_value_tables_dict) | map('combine') }}"
+          users: "{{ _users | zip(_value_users_dict) | map('combine') }}"
+      loop_control:
+        label: "{{ item.source }}"
+      loop: "{{ _patroni_cluster_fdw_databases }}"
+
+    - name: Query existing FDW servers
+      community.postgresql.postgresql_query:
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: SELECT * FROM pg_foreign_server;
+        login_db: "{{ _db_source }}"
+      vars:
+        _db_source: "{{ item.source }}"
+      loop_control:
+        label: "{{ _db_source }}"
+      loop: "{{ _patroni_cluster_fdw_targets }}"
+      become_user: "{{ _postgresql_user }}"
+      register: _patroni_fdw_server_results
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Query existing user mappings
+      community.postgresql.postgresql_query:
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: SELECT * FROM Information_schema.user_mapping_options;
+        login_db: "{{ _db_source }}"
+      vars:
+        _db_source: "{{ item.source }}"
+      loop_control:
+        label: "{{ _db_source }}"
+      loop: "{{ _patroni_cluster_fdw_targets }}"
+      become_user: "{{ _postgresql_user }}"
+      register: _patroni_fdw_user_results
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Set existing FDW user mappings fact
+      ansible.builtin.set_fact:
+        _patroni_fdw_existing_user_mappings: "{{ _patroni_fdw_existing_user_mappings + _users }}"
+      vars:
+        _db: "{{ item.item.source }}"
+        _query: "{{ item.query_result | default([]) }}"
+        _foreign_catalog: "{{ _query | selectattr('foreign_server_catalog', 'equalto', _db) }}"
+        _users: "{{ _foreign_catalog | rejectattr('option_name', 'equalto', 'password') }}"
+      loop_control:
+        label: "{{ _db }}"
+      loop: "{{ _patroni_fdw_user_results.results | default([]) }}"
+
+    - name: Set PostgreSQL FDW facts
+      ansible.builtin.set_fact:
+        _patroni_cluster_fdw_update: "{{ _update_fdw }}"
+        _patroni_cluster_fdw_create: "{{ _create_fdw }}"
+        _patroni_cluster_fdw_delete: "{{ _delete_fdw }}"
+      vars:
+        _map_fdw_defaults:
+          state: present
+          extension: postgres_fdw
+        _server_suffix: "{{ _patroni_cluster_fdw_server_suffix }}"
+        _app_name_suffix: "{{ _patroni_cluster_fdw_app_name_suffix }}"
+        _cluster_fdw: "{{ _patroni_cluster_fdw_targets }}"
+        _fdw_defaults: "{{ [_map_fdw_defaults] | product(_cluster_fdw) | map('combine') | sort(attribute='remote') }}"
+        _remote_dbs: "{{ _fdw_defaults | map(attribute='remote') }}"
+        _remote_format: "{{ _remote_dbs | map(_map_format, '%s_' + _server_suffix) }}"
+        _remote_regex: "{{ _remote_format | map('regex_replace', '-', '_') | map('lower') }}"
+        _foreign_servers_dict: "{{ _remote_regex | map(_to_dict, 'foreign_server') }}"
+        _foreign_servers: "{{ _fdw_defaults | zip(_foreign_servers_dict) | map('combine') }}"
+        _app_names: "{{ _foreign_servers | map(attribute='source') }}"
+        _app_names_format: "{{ _app_names | map(_map_format, _app_name_suffix + '_%s') }}"
+        _app_names_dict: "{{ _app_names_format | map(_to_dict, 'application_name') }}"
+        _cluster_fdw_overwritten: "{{ _foreign_servers | zip(_app_names_dict) | map('combine') }}"
+        _targets: "{{ _cluster_fdw_overwritten | selectattr('state', 'equalto', 'present') }}"
+        _query_server: "{{ _patroni_fdw_server_results.results | default([]) }}"
+        _query_server_results: "{{ _query_server | selectattr('query_result', 'defined') | map(attribute='query_result') | flatten }}"
+        _srvnames: "{{ _query_server_results | selectattr('srvname', 'defined') | map(attribute='srvname') | flatten }}"
+        _update_fdw: "{{ _targets | selectattr('foreign_server', 'in', _srvnames) }}"
+        _create_fdw: "{{ _targets | difference(_update_fdw) }}"
+        _delete_fdw: "{{ _cluster_fdw_overwritten | difference(_targets) }}"
+
+    - name: Query existing foreign tables
+      community.postgresql.postgresql_query:
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: SELECT * FROM Information_schema.foreign_table_options;
+        login_db: "{{ _db_source }}"
+      vars:
+        _db_source: "{{ item.source }}"
+        _fdw: "{{ _patroni_cluster_fdw_update + _patroni_cluster_fdw_create }}"
+      loop_control:
+        label: "{{ _db_source }}"
+      loop: "{{ _fdw }}"
+      become_user: "{{ _postgresql_user }}"
+      register: _patroni_fdw_table_results
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Set existing FDW tables fact
+      ansible.builtin.set_fact:
+        _patroni_fdw_existing_tables: "{{ _patroni_fdw_existing_tables + [_map_tables] }}"
+      vars:
+        _query: "{{ item.query_result | default([]) }}"
+        _map_tables:
+          source: "{{ item.item.source }}"
+          remote: "{{ item.item.remote }}"
+          foreign_server: "{{ item.item.foreign_server }}"
+          tables: "{{ _query }}"
+      loop_control:
+        label: "{{ item.item.remote }}"
+      loop: "{{ _patroni_fdw_table_results.results | default([]) }}"
+      when: _query | length > 0
+
+    - name: Set FDW delete tables fact
+      ansible.builtin.set_fact:
+        _patroni_fdw_delete_tables: "{{ _patroni_fdw_delete_tables + [_map_tables] }}"
+      vars:
+        _foreign_server: "{{ item.foreign_server }}"
+        _fdw: "{{ _patroni_cluster_fdw_update + _patroni_cluster_fdw_delete }}"
+        _users: "{{ _patroni_fdw_existing_user_mappings }}"
+        _server_catalog: "{{ _users | selectattr('foreign_server_name', 'equalto', _foreign_server) }}"
+        _target_users: "{{ _server_catalog | map(attribute='authorization_identifier') }}"
+        _suffix: "{{ _patroni_cluster_fdw_table_suffix }}"
+        _target_server: "{{ _fdw | selectattr('source', 'equalto', item.source) }}"
+        _target_tables: "{{ _target_server | map(attribute='tables') | flatten | map(attribute='key') | flatten }}"
+        _target_tables_format: "{{ _target_tables | map(_map_format, '%s_' + _suffix) }}"
+        _filter_tables: "{{ item.tables | rejectattr('foreign_table_name', 'in', _target_tables_format) }}"
+        _delete_tables: "{{ _filter_tables | selectattr('option_name', 'equalto', 'table_name') }}"
+        _map_tables:
+          source: "{{ item.source }}"
+          remote: "{{ item.remote }}"
+          foreign_server: "{{ _foreign_server }}"
+          tables: "{{ _delete_tables }}"
+          users: "{{ _target_users | map(_to_dict, 'key') }}"
+      loop_control:
+        label: "{{ item.source }}"
+      loop: "{{ _patroni_fdw_existing_tables | default([]) }}"
+      when: _delete_tables | length > 0
+
+    - name: Set FDW delete user mappings fact
+      ansible.builtin.set_fact:
+        _patroni_fdw_delete_user_mappings: "{{ _patroni_fdw_delete_user_mappings + [_map_user] }}"
+      vars:
+        _map_default:
+          tables: "{{ _target_servers | map(attribute='tables') | flatten }}"
+        _foreign_server: "{{ item.foreign_server_name }}"
+        _target_servers: "{{ _patroni_cluster_fdw_update | selectattr('foreign_server', 'equalto', _foreign_server) }}"
+        _target_users: "{{ _target_servers | map(attribute='users') | flatten | map(attribute='key') | flatten }}"
+        _user: "{{ item.option_value }}"
+        _map_user: "{{ item | combine(_map_default) }}"
+      loop_control:
+        label: "Server Name: {{ _foreign_server }} - Username: {{ _user }}"
+      loop: "{{ _patroni_fdw_existing_user_mappings | selectattr('option_name', 'equalto', 'user') }}"
+      when: not _user in _target_users
+
+    - name: Query existing PostgreSQL schemas
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          SELECT schema_name FROM information_schema.schemata;
+        autocommit: true
+      vars:
+        _db_source: "{{ item.source }}"
+      loop_control:
+        label: "{{ _db_source }}"
+      loop: "{{ _patroni_cluster_fdw_update + _patroni_cluster_fdw_create }}"
+      become_user: "{{ _postgresql_user }}"
+      register: _patroni_fdw_schemas
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Verify PostgreSQL schemas for databases
+      ansible.builtin.assert:
+        that: _schemas_filter | length == 0
+        fail_msg: "There are missing schemas: {{ _schemas_filter }}"
+      vars:
+        _results: "{{ _patroni_fdw_schemas.results | default([]) }}"
+        _query_results: "{{ _results | map(attribute='query_result') | flatten }}"
+        _existing_schemas: "{{ _query_results | map(attribute='schema_name') | unique }}"
+        _fdw: "{{ _patroni_cluster_fdw_update + _patroni_cluster_fdw_create }}"
+        _tables: "{{ _fdw | map(attribute='tables') | flatten }}"
+        _target_schemas: "{{ _tables | selectattr('value.source_schema', 'defined') | map(attribute='value.source_schema') | lower }}"
+        _target_schemas_default: "{{ _target_schemas + ['public'] | unique }}"
+        _schemas_filter: "{{ _target_schemas_default | reject('in', _existing_schemas) }}"
+
+    - name: Verify postgresql foreign data wrapper user mapping password defined
+      ansible.builtin.assert:
+        that: _password | length == 0
+        fail_msg: "Foreign data wrapper user mapping passwords must be defined for these users: [{{ _usernames | join(', ') }}]"
+      vars:
+        _databases: "{{ _patroni_cluster_fdw_update + _patroni_cluster_fdw_create }}"
+        _users: "{{ _databases | map(attribute='users') | flatten }}"
+        _password_enabled: "{{ _users | selectattr('value.password_required') }}"
+        _password: "{{ _password_enabled | rejectattr('value.password', 'defined') }}"
+        _usernames: "{{ _password | map(attribute='key') }}"
+
+    - name: Debug existing foreign data wrapper servers
+      ansible.builtin.debug:
+        msg: "{{ _foreign_servers }}"
+      vars:
+        _query_server: "{{ _patroni_fdw_server_results.results | default([]) }}"
+        _query_server_select: "{{ _query_server | selectattr('query_result', 'defined') }}"
+        _query_server_results: "{{ _query_server_select | map(attribute='query_result') | flatten }}"
+        _foreign_servers: "{{ _query_server_results | selectattr('srvname', 'defined') | map(attribute='srvname') | flatten }}"
+
+    - name: Debug existing user mappings
+      ansible.builtin.debug:
+        msg: "{{ _patroni_fdw_existing_user_mappings }}"
+
+    - name: Debug existing foreign tables
+      ansible.builtin.debug:
+        msg: "{{ _patroni_fdw_existing_tables }}"
+
+    - name: Debug new foreign data wrappers
+      ansible.builtin.debug:
+        msg: "{{ _fdw }}"
+      vars:
+        _fdw: "{{ _patroni_cluster_fdw_create | map(_drop_attrs, ['password']) }}"
+
+    - name: Debug foreign data wrapper targets
+      ansible.builtin.debug:
+        msg: "{{ _fdw }}"
+      vars:
+        _fdw: "{{ _patroni_cluster_fdw_update | map(_drop_attrs, ['password']) }}"
+
+    - name: Debug stale foreign data wrappers
+      ansible.builtin.debug:
+        msg: "{{ _fdw }}"
+      vars:
+        _fdw: "{{ _patroni_cluster_fdw_delete | map(_drop_attrs, ['password']) }}"
+
+    - name: Debug stale foreign tables
+      ansible.builtin.debug:
+        msg: "{{ _patroni_fdw_delete_tables }}"
+
+    - name: Debug stale user mappings
+      ansible.builtin.debug:
+        msg: "{{ _patroni_fdw_delete_user_mappings }}"
+
+    - name: Create PostgreSQL extension
+      community.postgresql.postgresql_ext:
+        name: "{{ item.extension }}"
+        login_db: "{{ _db }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        state: present
+      vars:
+        _db: "{{ item.source }}"
+      loop_control:
+        label: "{{ _db }}"
+      loop: "{{ _patroni_cluster_fdw_create }}"
+      become_user: "{{ _postgresql_user }}"
+
+    - name: Create PostgreSQL remote servers
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          CREATE SERVER {{ _foreign_server }}
+          FOREIGN DATA WRAPPER {{ _extension }}
+          OPTIONS (host '{{ _host }}', dbname '{{ _db_remote }}', fetch_size '{{ _fetch_size }}',
+          port '{{ _slave_port }}', updatable '{{ _updatable }}', truncatable '{{ _truncatable }}',
+          application_name '{{ _app_name }}');
+        autocommit: true
+      vars:
+        _slave_port: "{{ _patroni_cluster_fdw_port }}"
+        _host: "{{ _patroni_cluster_fdw_server }}"
+        _foreign_server: "{{ item.foreign_server }}"
+        _db_source: "{{ item.source }}"
+        _db_remote: "{{ item.remote }}"
+        _extension: "{{ item.extension | lower }}"
+        _updatable: "{{ item.updatable | default('true') }}"
+        _truncatable: "{{ item.truncatable | default('true') }}"
+        _fetch_size: "{{ item.fetch_size | default('100') }}"
+        _app_name: "{{ item.application_name }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - Host: {{ _host }} - App: {{ _app_name }}"
+      loop: "{{ _patroni_cluster_fdw_create }}"
+      become_user: "{{ _postgresql_user }}"
+      when: _extension == 'postgres_fdw'
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Update PostgreSQL remote servers
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          ALTER SERVER {{ _foreign_server }}
+          OPTIONS (SET host '{{ _host }}', SET dbname '{{ _db_remote }}',
+          SET port '{{ _slave_port }}', SET updatable '{{ _updatable }}',
+          SET truncatable '{{ _truncatable }}', SET fetch_size '{{ _fetch_size }}',
+          SET application_name '{{ _app_name }}');
+        autocommit: true
+      vars:
+        _slave_port: "{{ _patroni_cluster_fdw_port }}"
+        _host: "{{ _patroni_cluster_fdw_server }}"
+        _foreign_server: "{{ item.foreign_server }}"
+        _db_source: "{{ item.source }}"
+        _db_remote: "{{ item.remote }}"
+        _extension: "{{ item.extension | lower }}"
+        _updatable: "{{ item.updatable | default('true') }}"
+        _truncatable: "{{ item.truncatable | default('true') }}"
+        _fetch_size: "{{ item.fetch_size | default('100') }}"
+        _app_name: "{{ item.application_name }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - Host: {{ _host }} - App: {{ _app_name }}"
+      loop: "{{ _patroni_cluster_fdw_update }}"
+      become_user: "{{ _postgresql_user }}"
+      changed_when: false
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Create PostgreSQL user mappings
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          CREATE USER MAPPING FOR {{ _username }}
+          SERVER {{ _foreign_server }}
+          OPTIONS (user '{{ _username }}', {{ _password_filter }});
+        autocommit: true
+      vars:
+        _server_object: "{{ item.0 }}"
+        _user_object: "{{ item.1 }}"
+        _foreign_server: "{{ _server_object.foreign_server }}"
+        _db_source: "{{ _server_object.source }}"
+        _db_remote: "{{ _server_object.remote }}"
+        _username: "{{ _user_object.key }}"
+        _required: "{{ _user_object.value.password_required | bool }}"
+        _password: "{{ _user_object.value.password }}"
+        _password_filter: "{{ _password_enabled if _required else _password_disabled }}"
+        _password_enabled: "password '{{ _password }}', password_required '{{ _required }}'"
+        _password_disabled: "password_required '{{ _required }}'"
+        _fdw: "{{ _patroni_cluster_fdw_update + _patroni_cluster_fdw_create }}"
+        _user_mappings: "{{ _patroni_fdw_existing_user_mappings }}"
+        _users_catalog: "{{ _user_mappings | selectattr('foreign_server_name', 'equalto', _foreign_server) }}"
+        _users: "{{ _users_catalog | selectattr('option_name', 'equalto', 'user') }}"
+        _existing_users: "{{ _users | map(attribute='option_value') | flatten }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - User: {{ _username }}"
+      loop: "{{ _fdw | subelements('users') }}"
+      become_user: "{{ _postgresql_user }}"
+      no_log: "{{ _patroni_nolog }}"
+      when: not _username in _existing_users
+
+    - name: Update PostgreSQL user mappings
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          ALTER USER MAPPING FOR {{ _username }}
+          SERVER {{ _foreign_server }}
+          OPTIONS (SET user '{{ _username }}', {{ _password_filter }});
+        autocommit: true
+      vars:
+        _server_object: "{{ item.0 }}"
+        _user_object: "{{ item.1 }}"
+        _user_mappings: "{{ _patroni_fdw_existing_user_mappings }}"
+        _users_catalog: "{{ _user_mappings | selectattr('foreign_server_name', 'equalto', _foreign_server) }}"
+        _users: "{{ _users_catalog | selectattr('option_name', 'equalto', 'password_required') }}"
+        _existing_password_disabled: "{{ _users | rejectattr('option_value') }}"
+        _existing_users: "{{ _existing_password_disabled | map(attribute='authorization_identifier') | flatten }}"
+        _foreign_server: "{{ _server_object.foreign_server }}"
+        _db_source: "{{ _server_object.source }}"
+        _db_remote: "{{ _server_object.remote }}"
+        _username: "{{ _user_object.key }}"
+        _required: "{{ _user_object.value.password_required }}"
+        _action: "{{ 'ADD' if (_username in _existing_users) else 'SET' }}"
+        _password: "{{ _user_object.value.password }}"
+        _password_filter: "{{ _password_enabled if _required else _password_disabled }}"
+        _password_enabled: "{{ _action }} password '{{ _password }}', SET password_required '{{ _required }}'"
+        _password_disabled: "SET password_required '{{ _required }}'"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - User: {{ _username }}"
+      loop: "{{ _patroni_cluster_fdw_update | subelements('users') }}"
+      become_user: "{{ _postgresql_user }}"
+      changed_when: false
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Create PostgreSQL foreign tables
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          CREATE FOREIGN TABLE {{ _foreign_table_name }}
+          ({{ _columns }})
+          SERVER {{ _foreign_server }}
+          OPTIONS (schema_name '{{ _remote_schema }}', table_name '{{ _table_name }}');
+        autocommit: true
+      vars:
+        _suffix: "{{ _patroni_cluster_fdw_table_suffix }}"
+        _server: "{{ item.0 }}"
+        _table: "{{ item.1 }}"
+        _foreign_server: "{{ _server.foreign_server }}"
+        _db_source: "{{ _server.source }}"
+        _table_name: "{{ _table.key }}"
+        _foreign_table_name: "{{ _source_schema }}.{{ _table_name }}_{{ _suffix }}"
+        _columns: "{{ _table.value.columns | join(', ') }}"
+        _remote_schema: "{{ _table.value.remote_schema }}"
+        _source_schema: "{{ _table.value.source_schema }}"
+        _fdw: "{{ _patroni_cluster_fdw_update + _patroni_cluster_fdw_create }}"
+        _existing: "{{ _patroni_fdw_existing_tables | selectattr('source', 'equalto', _db_source) }}"
+        _existing_tables: "{{ _existing | map(attribute='tables') | flatten }}"
+        _existing_tables_option: "{{ _existing_tables | selectattr('option_name', 'defined') }}"
+        _existing_table_objects: "{{ _existing_tables_option | selectattr('option_name', 'equalto', 'table_name') | flatten }}"
+        _existing_table_names: "{{ _existing_table_objects | map(attribute='option_value') }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - Foreign_table: {{ _foreign_table_name }} - Table_name: {{ _table_name }}"
+      loop: "{{ _fdw | subelements('tables') }}"
+      become_user: "{{ _postgresql_user }}"
+      when: not _table_name in _existing_table_names
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Manage PostgreSQL grant usage privs
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          GRANT USAGE ON FOREIGN SERVER {{ _foreign_server }} TO {{ _users }};
+        autocommit: true
+      vars:
+        _foreign_server: "{{ item.foreign_server }}"
+        _db_source: "{{ item.source }}"
+        _users: "{{ item.users | map(attribute='key') | join(', ') }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - Database: {{ _db_source }}"
+      loop: "{{ _patroni_cluster_fdw_create + _patroni_cluster_fdw_update }}"
+      become_user: "{{ _postgresql_user }}"
+      changed_when: false
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Manage PostgreSQL grant select privs
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          GRANT SELECT ON TABLE {{ _table_name }} TO {{ _users }};
+        autocommit: true
+      vars:
+        _server_object: "{{ item.0 }}"
+        _table_object: "{{ item.1 }}"
+        _suffix: "{{ _patroni_cluster_fdw_table_suffix }}"
+        _schema: "{{ _table_object.value.source_schema }}"
+        _table_name: "{{ _schema }}.{{ item.1.key }}_{{ _suffix }}"
+        _db_source: "{{ _server_object.source }}"
+        _db_remote: "{{ _server_object.remote }}"
+        _fdw: "{{ _patroni_cluster_fdw_create + _patroni_cluster_fdw_update }}"
+        _users: "{{ _server_object.users | map(attribute='key') | join(', ') }}"
+      loop_control:
+        label: "Database: {{ _db_source }} - Foreign_table: {{ _table_name }}"
+      loop: "{{ _fdw | subelements('tables') }}"
+      become_user: "{{ _postgresql_user }}"
+      changed_when: false
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Revoke PostgreSQL grant select privs from stale users
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          REVOKE SELECT ON TABLE {{ _table_name }} FROM {{ _username }};
+        autocommit: true
+      vars:
+        _suffix: "{{ _patroni_cluster_fdw_table_suffix }}"
+        _user: "{{ item.0 }}"
+        _table: "{{ item.1 }}"
+        _foreign_server: "{{ _user.foreign_server_name }}"
+        _db_source: "{{ _user.foreign_server_catalog }}"
+        _schema: "{{ _table.value.source_schema }}"
+        _table_name: "{{ _schema }}.{{ _table.key }}_{{ _suffix }}"
+        _username: "{{ _user.option_value }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - Foreign_table: {{ _table_name }} - User: {{ _username }}"
+      loop: "{{ _patroni_fdw_delete_user_mappings | subelements('tables') }}"
+      become_user: "{{ _postgresql_user }}"
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Revoke PostgreSQL grant usage privs from stale users
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          REVOKE USAGE ON FOREIGN SERVER {{ _foreign_server }} FROM {{ _username }};
+        autocommit: true
+      vars:
+        _user: "{{ item }}"
+        _foreign_server: "{{ _user.foreign_server_name }}"
+        _db_source: "{{ _user.foreign_server_catalog }}"
+        _username: "{{ _user.option_value }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - User: {{ _username }}"
+      loop: "{{ _patroni_fdw_delete_user_mappings }}"
+      become_user: "{{ _postgresql_user }}"
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Revoke PostgreSQL grant select privs
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          REVOKE SELECT ON TABLE {{ _table_name }} FROM {{ _users }};
+        autocommit: true
+      vars:
+        _suffix: "{{ _patroni_cluster_fdw_table_suffix }}"
+        _delete_tables: "{{ _patroni_fdw_delete_tables + _patroni_cluster_fdw_delete }}"
+        _server: "{{ item.0 }}"
+        _table: "{{ item.1 }}"
+        _db_source: "{{ _server.source }}"
+        _foreign_server: "{{ _server.foreign_server }}"
+        _db_remote: "{{ _server.remote }}"
+        _schema: "{{ _table.value.source_schema if _is_key else _table.foreign_table_schema }}"
+        _is_key: "{{ _table.key is defined }}"
+        _table_key: "{{ _table.key }}"
+        _table_filter: "{{ _table_key if _is_key else _table.option_value }}"
+        _table_name: "{{ _schema }}.{{ _table_filter }}_{{ _suffix }}"
+        _users: "{{ _server.users | map(attribute='key') | join(', ') }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - Database: {{ _db_source }} - Foreign_table: {{ _table_name }}"
+      loop: "{{ _delete_tables | subelements('tables') }}"
+      become_user: "{{ _postgresql_user }}"
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Revoke PostgreSQL grant usage privs
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          REVOKE USAGE ON FOREIGN SERVER {{ _foreign_server }} FROM {{ _users }};
+        autocommit: true
+      vars:
+        _server_object: "{{ item }}"
+        _db_source: "{{ _server_object.source }}"
+        _db_remote: "{{ _server_object.remote }}"
+        _foreign_server: "{{ _server_object.foreign_server }}"
+        _users: "{{ _server_object.users | map(attribute='key') | join(', ') }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - Database: {{ _db_source }}"
+      loop: "{{ _patroni_cluster_fdw_delete }}"
+      become_user: "{{ _postgresql_user }}"
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Drop PostgreSQL foreign tables
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          DROP FOREIGN TABLE {{ _table_name }};
+        autocommit: true
+      vars:
+        _suffix: "{{ _patroni_cluster_fdw_table_suffix }}"
+        _delete_tables: "{{ _patroni_fdw_delete_tables + _patroni_cluster_fdw_delete }}"
+        _server: "{{ item.0 }}"
+        _table: "{{ item.1 }}"
+        _db_source: "{{ _server.source }}"
+        _foreign_server: "{{ _server.foreign_server }}"
+        _db_remote: "{{ _server.remote }}"
+        _schema: "{{ _table.value.source_schema if _is_key else _table.foreign_table_schema }}"
+        _is_key: "{{ _table.key is defined }}"
+        _table_key: "{{ _table.key }}"
+        _table_filter: "{{ _table_key if _is_key else _table.option_value }}"
+        _table_name: "{{ _schema }}.{{ _table_filter }}_{{ _suffix }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - Database: {{ _db_source }} - Foreign_table: {{ _table_name }}"
+      loop: "{{ _delete_tables | subelements('tables') }}"
+      become_user: "{{ _postgresql_user }}"
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Drop PostgreSQL user mappings
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          DROP USER MAPPING FOR {{ _username }}
+          SERVER {{ _foreign_server }};
+        autocommit: true
+      vars:
+        _server_object: "{{ item.0 }}"
+        _foreign_server: "{{ _server_object.foreign_server }}"
+        _db_source: "{{ _server_object.source }}"
+        _username: "{{ item.1.key }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }} - User: {{ _username }}"
+      loop: "{{ _patroni_cluster_fdw_delete | subelements('users') }}"
+      become_user: "{{ _postgresql_user }}"
+      no_log: "{{ _patroni_nolog }}"
+
+    - name: Drop PostgreSQL remote servers
+      community.postgresql.postgresql_query:
+        login_db: "{{ _db_source }}"
+        login_port: "{{ _patroni_haproxy_port_psql_master_local }}"
+        query: >-
+          DROP SERVER {{ _foreign_server }};
+        autocommit: true
+      vars:
+        _foreign_server: "{{ item.foreign_server }}"
+        _db_source: "{{ item.source }}"
+      loop_control:
+        label: "Server: {{ _foreign_server }}"
+      loop: "{{ _patroni_cluster_fdw_delete }}"
+      become_user: "{{ _postgresql_user }}"
+      no_log: "{{ _patroni_nolog }}"
