@@ -245,3 +245,15 @@
         - name: Create cluster group
           ansible.builtin.group_by:
             key: "{{ _patroni_cluster_member_group }}"
+
+    - name: Build patroni config slots
+      ansible.builtin.set_fact:
+        patroni_config_slots: "{{ _config_slots }}"
+        patroni_defaults_dcs_slots: "{{ _default_slots }}"
+      vars:
+        _cluster_slots: "{{ patroni_cluster_config_slots }}"
+        _standby_slots: "{{ patroni_standby_config_slots }}"
+        _standby_manage: "{{ (_patroni_standby_slots_manage | bool) and (not _patroni_cluster_standby | bool) }}"
+        _config_slots: "{{ _standby_slots if _standby_manage else _cluster_slots }}"
+        _default_slots:
+          slots: "{{ _config_slots }}"

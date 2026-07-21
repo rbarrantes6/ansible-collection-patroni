@@ -57,7 +57,7 @@ Cluster wide parameters
 | patroni_cluster_hba                                 |                             [] | Patroni cluster hba objects                                  | false    |
 | patroni_cluster_fdw_server                          |         patroni haproxy server | Patroni cluster Foreign Data Wrapper server                  | false    |
 | patroni_cluster_fdw_port                            |                           5433 | Patroni cluster Foreign Data Wrapper port                    | false    |
-| patroni_cluster_fdw                                 |                             [] | Patroni cluster Foreign Data Wrapper objects                 | false    |
+| patroni_cluster_fdw                                 |                             {} | Patroni cluster Foreign Data Wrapper objects                 | false    |
 | patroni_cluster_fdw_table_suffix                    |                       'remote' | Patroni cluster Foreign Data Wrapper table name suffix       | false    |
 | patroni_cluster_fdw_server_suffix                   |                       'server' | Patroni cluster Foreign Data Wrapper server name suffix      | false    |
 | patroni_cluster_fdw_app_name_suffix                 |                          'fdw' | Patroni cluster Foreign Data Wrapper application name suffix | false    |
@@ -104,7 +104,14 @@ Cluster wide parameters
 | patroni_cluster_pg_partman_role                     |                       postgres | Enable pg_partman extension                                  | false    |
 | patroni_cluster_pg_partman_analyze                  |                            off | Enable pg_partman extension                                  | false    |
 | patroni_cluster_pg_partman_jobmon                   |                             on | Enable pg_partman extension                                  | false    |
+| patroni_cluster_timescaledb_enable_chunkwise        |                            off | Enable timescaledb extension                                 | false    |
+| patroni_cluster_timescaledb_vectorized_aggre        |                            off | Enable timescaledb extension                                 | false    |
+| patroni_cluster_timescaledb_enable_merge_on_cagg    |                            off | Enable timescaledb extension                                 | false    |
+| patroni_cluster_timescaledb_maxbackgroundworkers    |                             16 | Enable timescaledb extension                                 | false    |
+| patroni_cluster_timescaledb_restoring               |                            off | Enable timescaledb extension                                 | false    |
+| patroni_cluster_timescaledb_telemetry_level         |                          basic | Enable timescaledb extension                                 | false    |
 | patroni_cluster_standby                             |                          false | Flag to set whether a cluster is in standby mode             | false    |
+| patroni_standby_slots_manage                        |                          false | Flag to manage standby replication slots                     | false    |
 | patroni_standby_promote_force                       |                          false | Flag required to enforce switch a cluster to standby mode    | false    |
 | patroni_cluster_primary_members                     |                             [] | A list of patroni primary members (for standby cluster only) | false    |
 | patroni_standby_replica_methods                     |                 ['basebackup'] | Standby create replica methods                               | false    |
